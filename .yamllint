@@ -1,5 +1,7 @@
 ---
 extends: default
+# Skip what git ignores, e.g. module sources under terraform/.terraform/
+ignore-from-file: .gitignore
 rules:
   line-length:
     max: 140
