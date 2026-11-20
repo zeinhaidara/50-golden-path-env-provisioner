@@ -1,0 +1,63 @@
+---
+# Vars come from build/<env>/ansible-vars.json: ansible-playbook site.yml -e @../build/dev/ansible-vars.json
+- name: Prepare manifests and chart values
+  hosts: control
+  gather_facts: false
+  tags: [prepare]
+  vars:
+    golden_path_build_dir: "{{ playbook_dir }}/../build/{{ golden_path_env }}"
+  tasks:
+    - name: Check rendered variables are present
+      ansible.builtin.assert:
+        that:
+          - golden_path_env is match('^[a-z][a-z0-9-]+$')
+          - golden_path_app_image is search('[:@]')
+          - golden_path_app_replicas | int >= 1
+          - golden_path_retention_days | int >= 1
+        fail_msg: Run `python -m golden render` first and pass ansible-vars.json with -e @...
+        quiet: true
+
+    - name: Render sample app manifest
+      ansible.builtin.template:
+        src: sample-app.yaml.j2
+        dest: "{{ golden_path_build_dir }}/sample-app.yaml"
+        mode: "0644"
+
+    - name: Render kube-prometheus-stack values
+      ansible.builtin.template:
+        src: prometheus-values.yaml.j2
+        dest: "{{ golden_path_build_dir }}/prometheus-values.yaml"
+        mode: "0644"
+
+- name: Apply observability stack and sample app to the cluster
+  hosts: control
+  gather_facts: false
+  tags: [cluster]
+  vars:
+    golden_path_build_dir: "{{ playbook_dir }}/../build/{{ golden_path_env }}"
+    golden_path_prometheus_chart_version: "93.6.0"
+  tasks:
+    - name: Add prometheus-community chart repository
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+      when: golden_path_observability_enabled | bool
+
+    - name: Install kube-prometheus-stack
+      kubernetes.core.helm:
+        name: monitoring
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: "{{ golden_path_prometheus_chart_version }}"
+        release_namespace: monitoring
+        create_namespace: true
+        values_files:
+          - "{{ golden_path_build_dir }}/prometheus-values.yaml"
+        wait: true
+      when: golden_path_observability_enabled | bool
+
+    - name: Apply sample app
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ golden_path_build_dir }}/sample-app.yaml"
+        wait: true
+        wait_timeout: 300

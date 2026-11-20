@@ -1,0 +1,29 @@
+---
+# One file describes one environment. Validated against schema/environment.schema.json.
+environment: dev
+
+aws:
+  account_id: "123456789012"
+  region: eu-west-2
+
+network:
+  vpc_cidr: 10.40.0.0/16
+  availability_zones: [eu-west-2a, eu-west-2b]
+
+cluster:
+  kubernetes_version: "1.34"
+  node_instance_types: [m6i.large]
+  node_min_size: 2
+  node_desired_size: 2
+  node_max_size: 4
+  # Who can reach the EKS API endpoint (the CI runner needs it for the Ansible step).
+  api_allowed_cidrs: [203.0.113.0/24]
+
+observability:
+  enabled: true
+  retention_days: 7
+
+app:
+  name: hello
+  image: nginxinc/nginx-unprivileged:1.27.4-alpine
+  replicas: 2

@@ -1,0 +1,2 @@
+ansible-core==2.21.6
+kubernetes==37.0.3

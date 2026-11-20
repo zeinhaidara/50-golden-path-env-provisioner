@@ -1,0 +1,15 @@
+# Managed by the golden path playbook. Rendered per environment.
+prometheus:
+  prometheusSpec:
+    retention: {{ golden_path_retention_days }}d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+grafana:
+  enabled: true
+  # Not exposed outside the cluster; use kubectl port-forward.
+  service:
+    type: ClusterIP
+alertmanager:
+  enabled: true
