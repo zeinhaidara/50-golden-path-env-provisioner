@@ -1,0 +1,75 @@
+---
+name: ci
+
+# Static checks only. Nothing here talks to AWS or a cluster.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.15.8"
+  TF_SHA256: "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"
+  ACTIONLINT_VERSION: "1.7.12"
+  # sha256 of actionlint_1.7.12_linux_amd64.tar.gz from the release checksums file
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install actionlint and Terraform (sha256 checked)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar_name="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfLo "$RUNNER_TEMP/$tar_name" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tar_name}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$tar_name" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$tar_name" -C "$RUNNER_TEMP/bin" actionlint
+          zip="terraform_${TF_VERSION}_linux_amd64.zip"
+          curl -sSfLo "$RUNNER_TEMP/$zip" "https://releases.hashicorp.com/terraform/${TF_VERSION}/${zip}"
+          echo "${TF_SHA256}  $RUNNER_TEMP/$zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/$zip" -d "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: actionlint
+        run: actionlint
+
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m pytest -q
+      - name: Render dev parameters
+        run: python -m golden render params/dev.yaml --out build
+
+      - name: Terraform fmt, init (no backend), validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform validate
+
+      - run: yamllint .
+      - run: ansible-galaxy collection install -r ansible/requirements.yml
+      - name: ansible-lint
+        working-directory: ansible
+        run: ansible-lint
+      - name: Syntax check (both plays)
+        working-directory: ansible
+        run: ansible-playbook -i inventory.ini site.yml --syntax-check -e @../build/dev/ansible-vars.json
+      - name: Check mode (prepare play only; cluster play needs a cluster)
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          ansible-playbook -i inventory.ini site.yml --check --diff --skip-tags cluster \
+            -e @../build/dev/ansible-vars.json | tee "$RUNNER_TEMP/check.out"
+          # Fail if no task ran, e.g. the inventory didn't match any host.
+          grep -E 'localhost +: ok=[1-9]' "$RUNNER_TEMP/check.out"
