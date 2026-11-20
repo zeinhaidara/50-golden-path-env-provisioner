@@ -10,3 +10,9 @@ crash.log
 *.retry
 .ansible/
 *.vault-pass
+
+# Rendered per-environment files
+build/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
