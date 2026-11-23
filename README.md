@@ -10,7 +10,7 @@ Ansible and Kubernetes manifests.
 >
 > | Stage | How it is checked | Run for real? |
 > |---|---|---|
-> | Parameter file + JSON Schema + validator | 32 pytest tests, including 18 rejected inputs | yes, locally and in CI |
+> | Parameter file + JSON Schema + validator | 34 pytest tests, including 18 rejected inputs | yes, locally and in CI |
 > | Renderer (tfvars + Ansible vars) | pytest; output keys must match `variables.tf` and the playbook | yes |
 > | Terraform root (VPC + EKS + observability add-on) | `fmt -check`, `init -backend=false`, `validate` | **static only**; never planned or applied |
 > | Ansible "prepare" play (render manifests and chart values) | `ansible-lint`, `--syntax-check`, `--check` | check mode only |
@@ -27,6 +27,11 @@ Ansible and Kubernetes manifests.
 > Ansible + Kubernetes manifests) that provisions a complete greenfield
 > environment (VPC → EKS → observability → sample app) from a single
 > parameter file, suitable as a company golden-path template.
+
+Why it matters: when every team builds its own environment, each one ends
+up with different networks, cluster settings and monitoring, and each takes
+weeks. One reviewed template driven by a small parameter file gives every
+team the same starting point, with the guardrails already in place.
 
 ## Flow
 
@@ -102,14 +107,22 @@ guard checks all three.
 ### 5. Reusable workflow (`.github/workflows/provision.yml`)
 
 `on: workflow_call` with inputs `params_file`, `environment`,
-`aws_role_arn`, `tf_state_bucket`.
+`aws_plan_role_arn`, `aws_role_arn`, `tf_state_bucket`.
 
 - **validate:** render, `terraform validate`, upload `build/`.
-- **plan:** `id-token: write`, assumes `aws_role_arn` through GitHub OIDC
-  (no stored keys), `terraform plan -out tfplan`, uploads the plan.
+- **plan:** `id-token: write`, assumes the read-only `aws_plan_role_arn`
+  through GitHub OIDC (no stored keys), `terraform plan -lock=false -out
+  tfplan`, uploads the plan. The plan skips the state lock because a
+  read-only role can't write the S3 lock file; apply takes the lock and
+  refuses the plan if the state changed after it was made.
 - **apply:** runs in `environment: ${{ inputs.environment }}`. The gate is
   the **required reviewers** you configure on that GitHub environment.
-  Applies exactly the uploaded plan, gets a kubeconfig, runs the playbook.
+  Assumes `aws_role_arn`, applies exactly the uploaded plan, gets a
+  kubeconfig, runs the playbook.
+- **concurrency:** the workflow uses the group
+  `golden-path-provision-<environment>` with `cancel-in-progress: false`, so
+  two runs for the same environment never overlap. A second run waits; if a
+  third arrives, GitHub keeps only the newest pending one.
 
 Terraform is downloaded in each job and checked against a pinned sha256.
 Every action is pinned to a commit SHA that was checked against its tag.
@@ -126,12 +139,59 @@ jobs:
     with:
       params_file: params/dev.yaml
       environment: dev
+      aws_plan_role_arn: arn:aws:iam::123456789012:role/golden-path-plan
       aws_role_arn: arn:aws:iam::123456789012:role/golden-path-deployer
       tf_state_bucket: tfstate-123456789012-eu-west-2
     permissions:
       contents: read
       id-token: write
 ```
+
+### OIDC trust policy for the two roles (not built here)
+
+The roles are not part of this repo. Each needs a trust policy on the GitHub
+OIDC provider that checks both the audience and the subject. Because this is
+a reusable workflow, the `sub` claim names the **caller** repository, not
+this one. Use `StringEquals`, never a wildcard such as `repo:example-org/*`.
+
+| Role | Job | `token.actions.githubusercontent.com:sub` must equal |
+|---|---|---|
+| plan (read-only) | `plan`, no GitHub environment | `repo:<org>/<caller-repo>:ref:refs/heads/main` (or `...:pull_request` if callers plan on PRs) |
+| apply | `apply`, runs in `environment:` | `repo:<org>/<caller-repo>:environment:<environment>` |
+
+A job that names a GitHub environment gets the environment form of `sub`,
+so the apply role only trusts runs that passed that environment's
+protection rules. Both roles also need
+`token.actions.githubusercontent.com:aud` equal to `sts.amazonaws.com`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:example-org/platform-envs:environment:dev"
+        }
+      }
+    }
+  ]
+}
+```
+
+The plan role needs read access only (for example `ReadOnlyAccess` plus
+`s3:GetObject` and `s3:ListBucket` on the state bucket). The apply role
+needs the write permissions for VPC, EKS and IAM, plus write access to the
+state object and its `.tflock` file. To also pin which workflow may assume a
+role, GitHub can add `job_workflow_ref` to the `sub` claim through the
+repository's OIDC subject customization; the condition then includes this
+workflow's path and ref.
 
 ## Run the checks locally (same as CI)
 
@@ -166,7 +226,9 @@ Ansible runs on Linux or macOS only. On Windows, use WSL or a container.
 ## Security notes
 
 - No AWS keys anywhere: plan and apply assume a role through OIDC, and only
-  those two jobs get `id-token: write`.
+  those two jobs get `id-token: write`. Plan uses its own read-only role, so
+  code that runs during plan can't change the account.
+- One run per environment at a time (workflow `concurrency` group).
 - Apply needs a human approval on the protected GitHub environment and
   applies only the reviewed plan file.
 - `allowed_account_ids` stops a run against the wrong account.
