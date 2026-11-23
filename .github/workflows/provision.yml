@@ -14,8 +14,12 @@ on:
         description: GitHub environment for the apply job (protect it with required reviewers)
         type: string
         required: true
+      aws_plan_role_arn:
+        description: Read-only IAM role the plan job assumes through GitHub OIDC
+        type: string
+        required: true
       aws_role_arn:
-        description: IAM role assumed through GitHub OIDC
+        description: IAM role the apply job assumes through GitHub OIDC
         type: string
         required: true
       tf_state_bucket:
@@ -25,6 +29,12 @@ on:
 
 permissions:
   contents: read
+
+# One run per environment at a time. A second run waits; it never overlaps or
+# cancels a run that may be mid-apply.
+concurrency:
+  group: golden-path-provision-${{ inputs.environment }}
+  cancel-in-progress: false
 
 env:
   TF_VERSION: "1.15.8"
@@ -103,7 +113,7 @@ jobs:
           echo "$RUNNER_TEMP/tf" >> "$GITHUB_PATH"
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ inputs.aws_role_arn }}
+          role-to-assume: ${{ inputs.aws_plan_role_arn }}
           aws-region: ${{ needs.validate.outputs.region }}
       - name: Terraform plan
         working-directory: terraform
@@ -114,7 +124,9 @@ jobs:
             -backend-config="key=golden-path/${ENV_NAME}.tfstate" \
             -backend-config="region=${AWS_REGION}" \
             -backend-config="use_lockfile=true"
-          terraform plan -input=false -var-file="../build/${ENV_NAME}/terraform.tfvars.json" -out=tfplan
+          # -lock=false: the read-only role can't write the S3 lock file. Apply takes
+          # the lock, and refuses this plan if the state changed after it was made.
+          terraform plan -input=false -lock=false -var-file="../build/${ENV_NAME}/terraform.tfvars.json" -out=tfplan
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tfplan

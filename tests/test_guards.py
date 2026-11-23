@@ -12,7 +12,12 @@ ON = WF[True] if True in WF else WF["on"]  # PyYAML reads the bare `on` key as T
 
 def test_is_reusable_with_role_input():
     call = ON["workflow_call"]
-    assert set(call["inputs"]) >= {"params_file", "environment", "aws_role_arn"}
+    assert set(call["inputs"]) >= {
+        "params_file",
+        "environment",
+        "aws_plan_role_arn",
+        "aws_role_arn",
+    }
     assert "secrets" not in call
 
 
@@ -29,6 +34,29 @@ def test_only_plan_and_apply_get_oidc_tokens():
     assert "permissions" not in WF["jobs"]["validate"]
     for job in ("plan", "apply"):
         assert WF["jobs"][job]["permissions"]["id-token"] == "write"
+
+
+def _assumed_role(job):
+    [step] = [
+        s
+        for s in WF["jobs"][job]["steps"]
+        if s.get("uses", "").startswith("aws-actions/configure-aws-credentials@")
+    ]
+    return step["with"]["role-to-assume"]
+
+
+def test_plan_uses_its_own_read_only_role():
+    assert _assumed_role("plan") == "${{ inputs.aws_plan_role_arn }}"
+    assert _assumed_role("apply") == "${{ inputs.aws_role_arn }}"
+    plan_runs = "\n".join(s.get("run", "") for s in WF["jobs"]["plan"]["steps"])
+    assert "-lock=false" in plan_runs
+
+
+def test_one_run_per_environment():
+    assert WF["concurrency"] == {
+        "group": "golden-path-provision-${{ inputs.environment }}",
+        "cancel-in-progress": False,
+    }
 
 
 def test_no_stored_aws_keys():
